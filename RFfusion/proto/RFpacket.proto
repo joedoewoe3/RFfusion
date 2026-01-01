@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+message PacketHeader {
+  uint32 version = 1;  // For evolution (e.g., add fields later)
+  uint32 stream_id = 2;  // Group by array (e.g., your 3-6 antenna set)
+  uint32 sequence = 3;  // Order/detect drops
+  uint64 timestamp_us = 4;  // Microsec for TDOA precision
+  uint32 flags = 5;  // Bits: 1=partial, 2=end_of_burst, 4=error, 8=calibration_mode
+  // CCSDS-inspired add: Sync marker for noisy channels
+  bytes sync_marker = 6;  // Fixed pattern (e.g., 0x1ACFFC1D) for frame detection
+}
+
+enum PayloadKind {
+  RAW = 0;  // Direct antenna reads
+  FILTERED = 1;  // Post-Joseph E8 snap
+  PREDICTION = 2;  // Multipath forecasts
+  RESIDUAL = 3;  // Errs/CR bounds
+  CONTROL = 4;  // Config/naming
+}
+
+message AntennaData {  // Per-antenna block (repeated for 3-6)
+  string name = 1;  // E.g., "LatticeNode1" or "TrialityA"
+  double rss = 2;  // Signal strength (dBm)
+  repeated double tdoa = 3;  // Time diffs to other antennas
+  repeated double aoa = 4;  // Angle of arrival vector (room for 3D)
+  string units = 5;  // E.g., "dBm" or "us"
+}
+
+message RawSample {
+  repeated AntennaData antennas = 1;  // Your array data
+}
+
+message FilteredState {
+  repeated float x = 1;  // Fused state (e.g., positions from E8)
+  repeated float P_flat = 2;  // Cov (row-major)
+  uint32 model_version = 3;  // E8/Joseph tweaks
+  bytes param_hash = 4;  // Repro (primes, etc.)
+}
+
+message Prediction {
+  repeated float y_hat = 1;  // Forecast paths
+  uint32 horizon_steps = 2;
+  float step_interval_ms = 3;
+  repeated float conf_lower = 4;  // CR-inspired bounds
+  repeated float conf_upper = 5;
+  uint32 model_version = 6;
+}
+
+message Residual {
+  repeated float innovation = 1;
+  float mae = 2;
+  float rmse = 3;
+}
+
+message Control {
+  string kind = 1;  // "name_update", "calibrate_geometry"
+  uint32 new_version = 2;
+  bytes payload = 3;  // E.g., new antenna names or config blobs
+}
+
+message SignalPacket {
+  PacketHeader header = 1;
+  PayloadKind kind = 2;
+  oneof payload {
+    RawSample raw = 3;
+    FilteredState filtered = 4;
+    Prediction predict = 5;
+    Residual residual = 6;
+    Control control = 7;
+  }
+  uint32 crc32 = 15;  // Integrity (CCSDS-style checksum)
+}
