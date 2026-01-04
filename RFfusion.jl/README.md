@@ -16,7 +16,7 @@ Then:
 -open julia in RFfusion/ dir.
 
 Julia] activate .
-julia> PPkg.build()
+julia> Pkg.build()
 
 
 if protoc is not found, uncomment ENV["PROTOC"] = "path/to/protoc.exe" in RFfusion/deps/build.jl
