@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+message PacketHeader {
+    uint32 version = 1;
+    uint32 stream_id = 2;
+    uint32 sequence = 3;
+    uint64 timestamp_us = 4;
+    uint32 flags = 5;
+    bytes sync_marker = 6;
+}
+
+message RFPacket {  // Wrapper for full packet
+    PacketHeader header = 1;  // Embedded header
+    string node_label = 2;    // UTF-8, e.g., "LatticeNode1"
+    string status_msg = 3;    // UTF-8, e.g., "Init OTA"
+    bytes rf_packet = 4;      // Raw bytes for spectrum/AOA/RSS data
+    bytes firmware_update = 5; // Bytes for OTA blobs
+    bytes spectrum_bytes = 6; // Bytes for Joseph-filtered scans
+    // Add more? e.g., double aoa_deg = 7; for angle, int64 tdoa_ns = 8; for diff, int32 rss_dbm = 9;
+}

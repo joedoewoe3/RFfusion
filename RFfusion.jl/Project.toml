@@ -1,0 +1,13 @@
+name = "RFfusion"
+uuid = "46a1a427-2598-4919-baa2-266c48d952dd"
+version = "0.1.0"
+authors = ["Human Prime Generator"]
+
+[deps]
+
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+ProtoBuf = "3349acd9-ac6a-5e09-bcdb-63829b23a429"
+
+[compat]
+Libdl = "1.11.0"
+ProtoBuf = "1.2.0"
