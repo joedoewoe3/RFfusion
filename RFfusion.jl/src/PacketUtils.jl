@@ -195,6 +195,180 @@ end
 =#
 
 
+function send_data_ap_two(sender_id::Int, dest_id::Int, packet::RFpacket_pb.RFPacket; api_mode=2, broadcast=false)
+    sender = lattice_dict[sender_id]
+    dest_mac = broadcast ? hex2bytes("000000000000FFFF") : hex2bytes(lattice_dict[dest_id].mac)
+
+    # Encode proto
+    io = IOBuffer()
+    encode(io, packet)
+    payload = take!(io)
+
+    frame_id = 0x01::UInt8
+    data = UInt8[0x10, frame_id]
+    append!(data, dest_mac)
+    append!(data, [0xFF, 0xFE])  # Net addr unknown
+    push!(data, 0x00)  # Broadcast radius 0=max
+    push!(data, 0x00)  # Options (0x40 for disable ACK, etc.)
+    append!(data, payload)
+
+    # Escape
+    escaped_data = UInt8[]
+    for b in data
+        if api_mode == 2 && b in [0x7E, 0x7D, 0x11, 0x13]
+            push!(escaped_data, 0x7D)
+            push!(escaped_data, b ⊻ 0x20)
+        else
+            push!(escaped_data, b)
+        end
+    end
+
+    api_length = hton(UInt16(length(escaped_data)))
+    checksum = UInt8(0xFF - (sum(escaped_data) % 0x100))
+    frame = UInt8[0x7E, reinterpret(UInt8, [api_length])..., escaped_data..., checksum]
+
+    res = rf_write_packet(sender.handle, frame)
+    if res != 0
+        error("Send failed")
+    end
+    if res != 0
+        error("Write failed for AT $at_cmd on node $node_id")
+        end
+
+        buf = Vector{UInt8}()  # Accumulate all read bytes
+        start_time = time()
+        while time() - start_time < timeout_sec
+            temp_buf = Vector{UInt8}(undef, 512)
+            bytes_read = rf_read_packet(node.handle, temp_buf, 512)
+            if bytes_read > 0
+                append!(buf, temp_buf[1:bytes_read])
+            end
+
+            # Parse from buf (consume processed)
+            i = 1
+            while i <= length(buf)
+                if buf[i] == 0x7E
+                    # Unescape len (2 unescaped bytes)
+                    len_bytes, new_i = unescape_n(buf, i+1, 2)
+                    if isnothing(len_bytes)
+                        break  # Not enough
+                    end
+                    len = ntoh(reinterpret(UInt16, len_bytes)[1])
+                    i = new_i
+
+                    # Unescape data (len unescaped bytes)
+                    unescaped_data, new_i = unescape_n(buf, i, len)
+                    if isnothing(unescaped_data)
+                        break
+                    end
+                    i = new_i
+
+                    # Unescape checksum (1 unescaped byte)
+                    checksum_bytes, new_i = unescape_n(buf, i, 1)
+                    if isnothing(checksum_bytes)
+                        break
+                    end
+                    checksum_received = checksum_bytes[1]
+                    i = new_i
+
+                    # Verify
+                    checksum_calc = UInt8(0xFF - (sum(unescaped_data) % 0x100))
+                    if checksum_received != checksum_calc
+                        # Bad, skip to next 7E
+                        i = findnext(==(0x7E), buf, i)
+                        if isnothing(i)
+                            break
+                        end
+                        continue
+                    end
+
+                    # Success, extract
+                    if unescaped_data[1] == 0x88 && unescaped_data[2] == frame_id && unescaped_data[3:2+length(at_bytes)] == at_bytes
+                        status = unescaped_data[3+length(at_bytes)]
+                        if status == 0x00
+                            value = unescaped_data[4+length(at_bytes):end]
+                            return value
+                        else
+                            error("Status 0x$(string(status, base=16))")
+                        end
+                    end
+
+                    # Not ours, continue
+                else
+                    i += 1
+                end
+            end
+
+            # Remove processed (up to i-1)
+            buf = buf[i:end]
+
+            sleep(0.05)
+        end
+        error("Timeout on AT $at_cmd for node $node_id")
+
+        end
+
+        function receive_data_ap_two(node_id::Int; timeout_sec=5.0, api_mode=2)
+            node = lattice_dict[node_id]
+            buf = Vector{UInt8}()
+            start_time = time()
+            while time() - start_time < timeout_sec
+                temp_buf = Vector{UInt8}(undef, 512)
+                bytes_read = rf_read_packet(node.handle, temp_buf, 512)
+                if bytes_read > 0
+                    append!(buf, temp_buf[1:bytes_read])
+                end
+
+                i = 1
+                while i <= length(buf)
+                    if buf[i] == 0x7E
+                        len_bytes, new_i = unescape_n(buf, i+1, 2)
+                        if isnothing(len_bytes)
+                            break
+                        end
+                        len = ntoh(reinterpret(UInt16, len_bytes)[1])
+                        i = new_i
+
+                        unescaped_data, new_i = unescape_n(buf, i, len)
+                        if isnothing(unescaped_data)
+                            break
+                        end
+                        i = new_i
+
+                        checksum_bytes, new_i = unescape_n(buf, i, 1)
+                        if isnothing(checksum_bytes)
+                            break
+                        end
+                        checksum_received = checksum_bytes[1]
+                        i = new_i
+
+                        checksum_calc = UInt8(0xFF - (sum(unescaped_data) % 0x100))
+                        if checksum_received != checksum_calc
+                            continue
+                        end
+
+                        if unescaped_data[1] == 0x90  # RX Indicator
+                            src_mac = unescaped_data[2:9]
+                            src_net = unescaped_data[10:11]
+                            options = unescaped_data[12]
+                            payload = unescaped_data[13:end]
+
+                            # Decode proto
+                            io = IOBuffer(payload)
+                            packet = decode(io, RFPacket)
+
+                            return (src_mac=bytes2hex(src_mac), packet=packet)
+                        end
+                    else
+                        i += 1
+                    end
+                end
+                buf = buf[i:end]
+
+                sleep(0.05)
+            end
+            return nothing  # No data
+        end
 
 
 

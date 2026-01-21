@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <protobuf-c/protobuf-c.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,6 +8,8 @@
 #include <fcntl.h>      // For open
 #include <unistd.h>     // For close, write
 #include <termios.h>    // For serial config
+#include <sys/select.h>
+#include <sys/time.h>
 #include "RFpacket.pb-c.h"  // From protoc --c_out (tweak if name differs)
 
 // Assume your proto message is RFPacket; tweak if AntennaData
@@ -36,6 +39,11 @@ void* rf_open(const char* port, int baud) {
     options.c_oflag &= ~OPOST;             // Raw output
     options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);  // Raw input
     tcsetattr(fd, TCSANOW, &options);
+    if (tcsetattr(fd, TCSANOW, &options) < 0) {
+        perror("tcsetattr failed");
+        close(fd);
+        return NULL;
+    }
 
     RFHandle* handle = malloc(sizeof(RFHandle));
     if (!handle) {
@@ -43,21 +51,25 @@ void* rf_open(const char* port, int baud) {
         return NULL;
     }
     handle->fd = fd;
+    printf("rf_open success: fd=%d\n", fd);
     return handle;
 }
 
 // Write proto-encoded packet (caller encodes to bytes; we just write raw)
-int rf_write_packet(void* h, const uint8_t* data, size_t len) {  // Changed int* to uint8_t* for bytes
+int rf_write_packet(void* h, const uint8_t* data, size_t len) {
     RFHandle* handle = (RFHandle*)h;
-    if (!handle || handle->fd == -1) return -1;
-
-    ssize_t written = write(handle->fd, data, len);
-    if (written != (ssize_t)len) {
-        perror("rf_write_packet: Partial or failed write");
+    if (!handle || handle->fd == -1) {
+        fprintf(stderr, "rf_write_packet: Invalid handle/fd\n");
         return -1;
     }
-    tcdrain(handle->fd);  // Wait for transmit complete
-    return 0;  // Success
+    printf("rf_write_packet: fd=%d, len=%zu\n", handle->fd, len);
+    ssize_t written = write(handle->fd, data, len);
+    if (written != (ssize_t)len) {
+        perror("rf_write_packet failed");
+        return -1;
+    }
+    tcdrain(handle->fd);
+    return 0;
 }
 
 // Close handle
@@ -74,13 +86,48 @@ int rf_read_packet(void* h, uint8_t* data, size_t max_len) {
     if (!handle || handle->fd == -1) return -1;
 
     size_t pos = 0;
+    struct timeval start, now;
+    gettimeofday(&start, NULL);  // Start time for overall timeout
     while (pos < max_len) {
-        ssize_t r = read(handle->fd, data + pos, max_len - pos);
-        if (r <= 0) {
-            if (r < 0) perror("rf_read_packet: Read failed");
-            return (int)pos > 0 ? (int)pos : r;
+        gettimeofday(&now, NULL);
+        double elapsed = (now.tv_sec - start.tv_sec) + (now.tv_usec - start.tv_usec) / 1e6;
+        if (elapsed >= 2.0) {
+            return (int)pos > 0 ? (int)pos : 0;  // Partial or no data
         }
-        pos += (size_t)r;
+
+        // Prepare select
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(handle->fd, &fds);
+        struct timeval tv = {0, 100000};  // 0.1s per select (adjustable)
+
+        int ready = select(handle->fd + 1, &fds, NULL, NULL, &tv);
+        if (ready < 0) {
+            if (errno == EINTR) continue;  // Signal interrupt: retry
+            perror("rf_read_packet: Select failed");  // Real error
+            return -1;
+        } else if (ready == 0) {
+            continue;  // Timeout: retry loop (overall time will catch)
+        }
+
+        if (FD_ISSET(handle->fd, &fds)) {
+
+        ssize_t r = read(handle->fd, data + pos, max_len - pos);
+        if (r > 0) {
+            pos += (size_t)r;
+        } else if (r == 0) {
+            // EOF? Rare for serial, but break
+            break;
+        } else {  // r < 0
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;  // Shouldn't happen post-select, but safe
+            }
+            perror("rf_read_packet: Read failed");  // Real error
+            return -1;
+
+            }
+        }
+
     }
     return (int)pos;
 }
